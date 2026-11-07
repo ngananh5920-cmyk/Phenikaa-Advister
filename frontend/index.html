@@ -51,6 +51,10 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
         <span class="sidebar-link-text">Lịch học</span>
       </a>
+      <a class="sidebar-link" href="#" data-nav-target="registerSection">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span class="sidebar-link-text">Đăng ký kỳ tới</span>
+      </a>
       <a class="sidebar-link" href="#" data-nav-target="coursesSection">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 1 4 17.5z"/><path d="M4 17.5A2.5 2.5 0 0 1 6.5 15H20"/></svg>
         <span class="sidebar-link-text">Môn học</span>
@@ -279,6 +283,27 @@
             <div id="schLegend" class="sch-legend"></div>
           </section>
           <dialog id="schAttDialog" class="sch-att-dialog" aria-labelledby="schAttTitle"></dialog>
+        </section>
+
+
+        <section id="registerSection" class="view-section">
+          <div class="page-intro">
+            <div>
+              <span class="section-kicker">ĐĂNG KÝ HỌC</span>
+              <h2>Đăng ký kỳ tới</h2>
+              <p>Môn đang mở khớp lộ trình của bạn.</p>
+            </div>
+            <div class="reg-actions">
+              <div class="wz-opts" id="regPaceOpts" role="group" aria-label="Cường độ học">
+                <button type="button" class="wz-opt" data-reg-pace="moderate">8–10 TC</button>
+                <button type="button" class="wz-opt" data-reg-pace="heavy">11–13 TC</button>
+                <button type="button" class="wz-opt" data-reg-pace="fast">14–16 TC</button>
+              </div>
+              <button id="regRefresh" class="text-action" type="button">Làm mới</button>
+            </div>
+          </div>
+          <div id="regMessage" class="sch-message hidden" role="status"></div>
+          <div id="regContent" class="reg-content"></div>
         </section>
 
         <section id="coursesSection" class="view-section">

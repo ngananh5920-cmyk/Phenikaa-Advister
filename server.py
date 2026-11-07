@@ -483,6 +483,69 @@ def get_class_schedule_ics():
         headers=headers,
     )
 
+
+# ============ Đăng ký học (đợt mở) + ưu tiên môn nên đăng ký ============
+
+@app.route("/api/registration-offers")
+def get_registration_offers():
+    """Danh sách học phần đang mở trên trang Đăng ký học (nếu đợt đang mở).
+
+    Ngoài đợt hoặc chưa crawl được → success=true, mo=false, có thong_bao.
+    """
+    from registration_offers import load_offers
+
+    user_dir = get_user_data_dir(create=False)
+    offers = load_offers(user_dir)
+    if offers is None:
+        return jsonify({
+            "success": True,
+            "mo": False,
+            "thong_bao": (
+                "Chưa có lịch đăng ký học. Hãy cập nhật dữ liệu QLĐT khi đợt "
+                "đăng ký đang mở (mục Đăng ký trực tuyến → Đăng ký học)."
+            ),
+            "data": None,
+        })
+    return jsonify({
+        "success": True,
+        "mo": bool(offers.get("mo")),
+        "thong_bao": offers.get("thong_bao") or "",
+        "data": _sanitize_for_json(offers),
+        "updated_at": (user_dir / "dang_ky_hoc.json").stat().st_mtime
+        if (user_dir / "dang_ky_hoc.json").exists() else None,
+    })
+
+
+@app.route("/api/registration-priority")
+def get_registration_priority():
+    """Ưu tiên môn nên đăng ký kỳ tới = giao (đang mở đăng ký) ∩ (lộ trình/gợi ý).
+
+    Query: ?pace=moderate|heavy|fast
+    Nếu đợt chưa mở hoặc chưa crawl → mo=false + thong_bao, không lỗi 404.
+    """
+    from registration_offers import load_offers, prioritize_for_next_semester
+    from planner import PACE_OPTIONS
+
+    data = load_roadmap()
+    if not data:
+        return jsonify({
+            "success": False,
+            "error": "Cần cập nhật dữ liệu QLĐT (chương trình + điểm) trước.",
+        }), 409
+
+    pace_key = (request.args.get("pace") or "moderate").lower()
+    if pace_key not in PACE_OPTIONS:
+        pace_key = "moderate"
+
+    user_dir = get_user_data_dir(create=False)
+    offers = load_offers(user_dir)
+    result = prioritize_for_next_semester(data, offers, pace_key=pace_key)
+    return jsonify({
+        "success": True,
+        "data": _sanitize_for_json(result),
+    })
+
+
 @app.route("/api/summary")
 def get_summary():
     data = load_roadmap()
@@ -801,6 +864,11 @@ def _run_crawl_job(job_id: str, mode: str, cdp_port: int = None, creds=None):
             text=True, encoding="utf-8", bufsize=1,
             env=child_env,
         )
+        # Lưu tiến trình để /api/crawl_cancel dừng được; nếu người dùng đã bấm hủy
+        # trong lúc Popen đang chạy thì dừng ngay.
+        job["proc"] = proc
+        if job.get("cancelled"):
+            _terminate_process(proc)
         for line in iter(proc.stdout.readline, ""):
             line = line.rstrip()
             if not line:
@@ -817,10 +885,15 @@ def _run_crawl_job(job_id: str, mode: str, cdp_port: int = None, creds=None):
         if proc.returncode == 0:
             job["status"] = "done"
             job["logs"].append({"step": "done", "status": "ok", "message": "Hoàn tất!", "progress": 100})
+        elif job.get("cancelled"):
+            job["status"] = "error"
+            job["logs"].append({"step": "done", "status": "error", "message": "Đã dừng theo yêu cầu của bạn."})
         else:
+            # Không gửi progress=100 khi lỗi: trước đây thanh tiến độ nhảy lên 100% nên
+            # giao diện trông như đã xong/treo dù job đã chết.
             job["status"] = "error"
             job["logs"].append({"step": "done", "status": "error",
-                                 "message": f"Script thoát với mã {proc.returncode}", "progress": 100})
+                                 "message": f"Tiến trình crawl đã dừng (mã thoát {proc.returncode})."})
     except Exception as e:
         job["status"] = "error"
         job["logs"].append({"step": "done", "status": "error", "message": f"Lỗi server: {e}", "progress": 100})
@@ -1005,6 +1078,19 @@ def crawl_stream(job_id):
                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.route("/api/crawl_cancel/<job_id>", methods=["POST"])
+def crawl_cancel(job_id):
+    """Dừng job crawl đang chạy của chính trình duyệt này (nút × / Hủy trên giao diện)."""
+    job = _get_owned_job(job_id)
+    if not job:
+        return jsonify({"success": False, "error": "Job không tồn tại"}), 404
+    if job.get("status") != "running":
+        return jsonify({"success": True, "status": job.get("status"), "already_finished": True})
+    job["cancelled"] = True
+    _terminate_process(job.get("proc"))
+    return jsonify({"success": True, "status": "cancelling"})
+
+
 @app.route("/api/crawl_status/<job_id>")
 def crawl_status(job_id):
     job = _get_owned_job(job_id)
@@ -1027,6 +1113,8 @@ if __name__ == "__main__":
     print("  - GET  /api/courses[?status=...]")
     print("  - GET  /api/course/<code>")
     print("  - GET  /api/groups")
+    print("  - GET  /api/registration-offers")
+    print("  - GET  /api/registration-priority?pace=moderate|heavy|fast")
     print("  - GET  /api/suggestions_next_semester?pace=moderate|heavy|fast")
     print("  - GET  /api/graduation_plan?pace=...&target=kha|gioi|xuat_sac")
     print("  - POST /api/refresh")

@@ -19,6 +19,7 @@ import re
 import time
 import os
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -95,6 +96,12 @@ ONLY_HASHES = {
     "#diemhoc",
     "#chuontrinhhoc",
     "#tracuu",
+    # Đăng ký học (đợt mở mới có dữ liệu). Hash thật có thể khác theo phiên bản SPA;
+    # crawler còn nhận diện thêm theo text menu (xem _is_registration_menu_item).
+    "#dangkyhoc",
+    "#dangkytuy",
+    "#dkhoc",
+    "#dangky",
 }
 
 # Mỗi mục menu tương ứng 1 bảng <table id="..."> cụ thể mà build_roadmap.py
@@ -102,12 +109,16 @@ ONLY_HASHES = {
 # Dùng để CHỜ ĐÚNG bảng đó xuất hiện thay vì đoán "HTML ngừng đổi" bằng độ
 # dài innerHTML — cách đoán cũ có thể báo "ổn định" quá sớm (đặc biệt sau khi
 # initMain() được gọi qua setTimeout(...,0), DOM có thể chưa kịp bắt đầu đổi
-# tại thời điểm đo) và làm crawl lưu nhầm trang cũ. "#tracuu" không có table
-# cố định (là danh sách dạng thẻ/card) nên để None -> dùng lại cách đo cũ.
+# tại thời điểm đo) và làm crawl lưu nhầm trang cũ. "#tracuu" / "#dangkyhoc"
+# không có table cố định (danh sách dạng thẻ/card/link) nên để None -> đo ổn định.
 HASH_TABLE_ID = {
     "#chuontrinhhoc": "tblHocPhan",
     "#diemhoc": "tblTongHopDiemHP",
     "#tracuu": None,
+    "#dangkyhoc": None,
+    "#dangkytuy": None,
+    "#dkhoc": None,
+    "#dangky": None,
 }
 
 # Thời gian chờ tối đa (ms) cho dòng dữ liệu thật xuất hiện, RIÊNG theo từng
@@ -118,7 +129,26 @@ HASH_TABLE_ID = {
 HASH_TIMEOUT_MS = {
     "#chuontrinhhoc": 10000,
     "#diemhoc": 20000,
+    "#dangkyhoc": 12000,
+    "#dangkytuy": 12000,
+    "#dkhoc": 12000,
+    "#dangky": 12000,
 }
+
+
+def _is_registration_menu_item(it: dict) -> bool:
+    """True nếu mục menu là trang 'Đăng ký học' (danh sách HP đang mở trong đợt)."""
+    try:
+        from registration_offers import _is_registration_menu
+        return _is_registration_menu(it.get("text") or "", it.get("hash") or "")
+    except Exception:
+        text = (it.get("text") or "").lower()
+        href = (it.get("hash") or "").lower()
+        if any(x in text for x in ("kết quả", "ket qua", "nguyện vọng", "nguyen vong", "đăng ký thi", "dang ky thi")):
+            return False
+        if "đăng ký học" in text or "dang ky hoc" in text:
+            return True
+        return href in ("#dangkyhoc", "#dangkytuy", "#dkhoc", "#dangky")
 
 
 # ============ Helpers ============
@@ -1692,6 +1722,17 @@ def crawl_pages(context, page, items, out_dir: Path):
             except Exception as e:
                 emit("crawl", "info", f"Không lấy được lịch học chi tiết từng lớp: {e}")
 
+        # Danh sách học phần đang mở trong đợt "Đăng ký học" -> dang_ky_hoc.json.
+        # Ngoài đợt trang thường trống → file vẫn được ghi với mo=false để UI báo đúng.
+        if _is_registration_menu_item(it) or h in (
+            "#dangkyhoc", "#dangkytuy", "#dkhoc", "#dangky",
+        ):
+            try:
+                from registration_offers import crawl_registration_offers
+                crawl_registration_offers(page, out_dir=out_dir, emit=emit)
+            except Exception as e:
+                emit("crawl", "info", f"Không lấy được danh sách Đăng ký học: {e}")
+
         if CRAWL_ALL and h == "#lichhoc":
             try:
                 crawl_lichhoc_weeks(page, out_dir)
@@ -1932,6 +1973,48 @@ def _cdp_endpoint(port: int = CDP_DEFAULT_PORT) -> str:
     return f"http://localhost:{port}"
 
 
+# Báo cho watchdog biết crawl đã xong (hoặc đang tự dọn dẹp) -> thôi theo dõi Chrome.
+_CDP_WATCHDOG_STOP = threading.Event()
+
+
+def _start_cdp_watchdog(port: int, stop_event: threading.Event, interval: float = 1.0, strikes: int = 4):
+    """Dừng crawl ngay khi người dùng tắt Chrome riêng của Advisor.
+
+    Vì sao cần: Playwright chỉ biết Chrome đã đóng khi ta gọi lệnh vào nó, mà các vòng chờ
+    đăng nhập lại nuốt mọi lỗi nên crawler cứ chạy tiếp tới hết timeout (180s).
+    Watchdog hỏi thẳng cổng CDP bằng HTTP (không phụ thuộc Playwright) mỗi ``interval`` giây.
+    Coi là "đã đóng" khi cổng không trả lời HOẶC không còn tab (type=page) nào — trường hợp
+    thứ hai xảy ra khi đóng cửa sổ nhưng Chrome còn chạy nền. Cần ``strikes`` lần liên tiếp
+    để tránh báo nhầm lúc tab đang chuyển trang.
+    Dùng os._exit vì thread phụ không thể làm main thread (đang kẹt trong Playwright) thoát.
+    """
+    endpoint = _cdp_endpoint(port)
+
+    def _page_count() -> int:
+        with urllib.request.urlopen(endpoint + "/json/list", timeout=1.5) as response:
+            targets = json.loads(response.read().decode("utf-8", "replace"))
+        return sum(1 for t in targets if isinstance(t, dict) and t.get("type") == "page")
+
+    def _run():
+        bad = 0
+        while not stop_event.wait(interval):
+            try:
+                alive = _page_count() > 0
+            except Exception:
+                alive = False
+            bad = 0 if alive else bad + 1
+            if bad >= strikes and not stop_event.is_set():
+                emit("login", "error",
+                     "Chrome riêng của Advisor đã bị đóng nên đã dừng crawl. "
+                     "Bấm 'Cập nhật dữ liệu' để thử lại.")
+                sys.stdout.flush()
+                os._exit(3)
+
+    thread = threading.Thread(target=_run, daemon=True, name="cdp-watchdog")
+    thread.start()
+    return thread
+
+
 def _acquire_single_cdp_page(context):
     """Đảm bảo chỉ còn ĐÚNG 1 tab để crawl trong Chrome riêng của Advisor.
 
@@ -2062,6 +2145,10 @@ def open_with_cdp(p, port: int = CDP_DEFAULT_PORT):
     except Exception as e:
         emit("login", "error", f"Lỗi khi lấy cửa sổ Chrome đang mở: {e}")
         return False
+
+    # Từ đây trở đi, nếu người dùng tắt Chrome thì dừng crawl ngay thay vì treo.
+    _CDP_WATCHDOG_STOP.clear()
+    _start_cdp_watchdog(port, _CDP_WATCHDOG_STOP)
 
     emit("login", "info", "Đã gắn vào Chrome đang chạy, đang dùng lại tab QLĐT (chỉ 1 tab)...", 12)
     try:
@@ -2584,7 +2671,19 @@ def main():
                     pass
                 emit("menu", "info", f"Chế độ --all: sẽ crawl {len(items)}/{len(all_items)} mục menu.", 48)
             else:
-                items = [it for it in items if it["hash"] in ONLY_HASHES]
+                # 3 trang lõi theo hash + trang Đăng ký học (nhận diện theo text/hash).
+                items = [
+                    it for it in items
+                    if it["hash"] in ONLY_HASHES or _is_registration_menu_item(it)
+                ]
+                # Tránh trùng nếu vừa khớp hash vừa khớp text.
+                seen_h, uniq = set(), []
+                for it in items:
+                    if it["hash"] in seen_h:
+                        continue
+                    seen_h.add(it["hash"])
+                    uniq.append(it)
+                items = uniq
 
             if not items:
                 emit("menu", "error", "Không tìm thấy menu cần thiết. Có thể session đã hết hạn.")
@@ -2601,6 +2700,7 @@ def main():
                     pass
 
             saved_paths = crawl_pages(context, page, items, out_dir)
+            _CDP_WATCHDOG_STOP.set()  # crawl xong: từ giờ đóng Chrome là việc bình thường
             if mode == "cdp":
                 # QUAN TRỌNG: context ở mode này LÀ cửa sổ Chrome thật của
                 # người dùng (gắn qua CDP) — context.close() sẽ đóng luôn
@@ -2609,6 +2709,7 @@ def main():
             else:
                 context.close()
         except Exception as e:
+            _CDP_WATCHDOG_STOP.set()
             emit("crawl", "error", f"Lỗi crawl: {e}")
             try:
                 if mode == "cdp":

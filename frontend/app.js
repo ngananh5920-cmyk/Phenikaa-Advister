@@ -63,6 +63,7 @@
     graduationSection: ["Điều kiện tốt nghiệp", "Kiểm tra ước tính theo Điều 26 Quy chế đào tạo"],
     supportSection: ["Hỗ trợ học tập", "Chọn mục tiêu GPA và xem kế hoạch phù hợp"],
     scheduleSection: ["Lịch học", "Thời khóa biểu theo tuần của các lớp đang học"],
+    registerSection: ["Đăng ký kỳ tới", "Ưu tiên môn đang mở đăng ký theo lộ trình của bạn"],
     coursesSection: ["Môn học", "Tra cứu và lọc theo trạng thái học phần"],
     syncSection: ["Cập nhật dữ liệu QLĐT", "Đồng bộ điểm số, chương trình đào tạo và dữ liệu sinh viên"],
   };
@@ -2244,6 +2245,164 @@
     });
   }
 
+
+  // ---------- Đăng ký kỳ tới (giao môn đang mở × lộ trình) ----------
+  async function loadRegistrationPriority() {
+    const msg = $("regMessage");
+    const content = $("regContent");
+    if (!content) return;
+    if (!state.roadmap) {
+      if (msg) {
+        msg.classList.remove("hidden");
+        msg.className = "sch-message";
+        msg.textContent = "Cần cập nhật dữ liệu QLĐT trước khi xem ưu tiên đăng ký.";
+      }
+      content.innerHTML = "";
+      return;
+    }
+    if (msg) {
+      msg.classList.remove("hidden");
+      msg.className = "sch-message";
+      msg.textContent = "Đang tải danh sách đăng ký…";
+    }
+    content.innerHTML = "";
+    document.querySelectorAll("#regPaceOpts [data-reg-pace]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.regPace === state.studyPace);
+    });
+    try {
+      const { status, body } = await api(`/api/registration-priority?pace=${encodeURIComponent(state.studyPace || "moderate")}`);
+      if (status === 409 || !body.success) {
+        if (msg) {
+          msg.className = "sch-message sch-message-error";
+          msg.textContent = body.error || "Không tải được ưu tiên đăng ký.";
+        }
+        return;
+      }
+      renderRegistrationPriority(body.data || {});
+    } catch (err) {
+      if (msg) {
+        msg.className = "sch-message sch-message-error";
+        msg.textContent = err.message || "Lỗi tải ưu tiên đăng ký.";
+      }
+    }
+  }
+
+  function renderRegistrationPriority(d) {
+    const msg = $("regMessage");
+    const content = $("regContent");
+    if (!content) return;
+
+    if (!d.mo) {
+      if (msg) {
+        msg.className = "sch-message";
+        msg.textContent = d.thong_bao
+          || "Chưa có lịch đăng ký học. Cập nhật dữ liệu QLĐT khi đợt đang mở.";
+      }
+      content.innerHTML = `<section class="overview-card reg-empty-card">
+        <p class="reg-empty-title">Chưa có đợt đăng ký</p>
+        <p class="muted-copy">Khi đợt mở, cập nhật dữ liệu QLĐT để xem môn nên đăng ký.</p>
+        <button type="button" class="btn-accent" data-go-section="syncSection">Cập nhật dữ liệu</button>
+      </section>`;
+      return;
+    }
+
+    if (msg) {
+      const n = d.open_count || 0;
+      const tc = d.within_pace_credits != null ? formatPlannerCredits(d.within_pace_credits) : null;
+      msg.className = "sch-message";
+      msg.textContent = tc != null
+        ? `Đang mở ${n} học phần · gợi ý ${tc} TC`
+        : `Đang mở ${n} học phần`;
+    }
+
+    const list = (d.within_pace && d.within_pace.length) ? d.within_pace : (d.priority || []);
+    const priorityHtml = list.length
+      ? list.map((item, idx) => {
+          const offer = item.offer || {};
+          const reason = (item.reasons && item.reasons[0]) || "";
+          const loai = offer.loai_nhan || "";
+          const tc = item.so_tin != null ? `${escapeHtml(formatPlannerCredits(item.so_tin))} TC` : "";
+          return `<div class="reg-row">
+            <span class="reg-num">${idx + 1}</span>
+            <div class="reg-main">
+              <strong>${escapeHtml(item.ten_hp || item.ma_hp || "Học phần")}</strong>
+              <span class="reg-sub">${[
+                item.ma_hp ? escapeHtml(item.ma_hp) : "",
+                tc,
+                loai ? escapeHtml(loai) : "",
+              ].filter(Boolean).join(" · ")}</span>
+              ${reason ? `<span class="reg-why">${escapeHtml(reason)}</span>` : ""}
+            </div>
+          </div>`;
+        }).join("")
+      : `<p class="muted-copy">Không có môn lộ trình nào đang mở đăng ký.</p>`;
+
+    const missing = d.missing_recommended || [];
+    const missingHtml = missing.length
+      ? `<details class="overview-card reg-block" open>
+          <summary class="reg-summary"><strong>Chưa mở</strong><span class="gx-muted">${missing.length}</span></summary>
+          <div class="reg-simple-list">
+            ${missing.map((c) => `<div class="reg-simple-row">
+              <span>${escapeHtml(c.ten_hp || c.ma_hp)}</span>
+              <span class="mono">${escapeHtml(c.ma_hp || "")}</span>
+              <span class="gx-muted">${c.so_tin != null ? escapeHtml(formatPlannerCredits(c.so_tin)) + " TC" : ""}</span>
+            </div>`).join("")}
+          </div>
+        </details>`
+      : "";
+
+    const other = d.other_open || [];
+    const otherHtml = other.length
+      ? `<details class="overview-card reg-block">
+          <summary class="reg-summary"><strong>Đang mở khác</strong><span class="gx-muted">${other.length}</span></summary>
+          <div class="reg-simple-list">
+            ${other.map((c) => {
+              const offer = c.offer || {};
+              return `<div class="reg-simple-row">
+                <span>${escapeHtml(c.ten_hp || c.ma_hp)}</span>
+                <span class="mono">${escapeHtml(c.ma_hp || "")}</span>
+                ${offer.loai_nhan ? `<span class="gx-muted">${escapeHtml(offer.loai_nhan)}</span>` : ""}
+              </div>`;
+            }).join("")}
+          </div>
+        </details>`
+      : "";
+
+    content.innerHTML = `
+      <section class="overview-card reg-block">
+        <div class="reg-block-head">
+          <h3 class="reg-h3">Nên đăng ký</h3>
+          <span class="gx-muted">${escapeHtml((d.pace && d.pace.label) || "")}</span>
+        </div>
+        <div class="reg-priority-list">${priorityHtml}</div>
+      </section>
+      ${missingHtml}
+      ${otherHtml}
+    `;
+  }
+
+  function initRegistration() {
+    $("regRefresh")?.addEventListener("click", () => loadRegistrationPriority());
+    document.querySelectorAll("#regPaceOpts [data-reg-pace]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.studyPace = btn.dataset.regPace || "moderate";
+        state.reseedPlan = true;
+        document.querySelectorAll("#regPaceOpts [data-reg-pace]").forEach((b) => {
+          b.classList.toggle("active", b.dataset.regPace === state.studyPace);
+        });
+        document.querySelectorAll("#paceOpts [data-pace]").forEach((b) => {
+          b.classList.toggle("active", b.dataset.pace === state.studyPace);
+        });
+        loadRegistrationPriority();
+        try { writePref("studyPace", state.studyPace); } catch (_) {}
+      });
+    });
+    $("registerSection")?.addEventListener("click", (event) => {
+      const go = event.target.closest("[data-go-section]");
+      if (go) setActiveSection(go.dataset.goSection, true);
+    });
+  }
+
   function setActiveSection(sectionId, resetScroll = false) {
     if (!SECTION_TITLES[sectionId]) return;
     state.activeSection = sectionId;
@@ -2257,6 +2416,7 @@
 
     if (sectionId === "graduationSection") loadGraduation();
     if (sectionId === "scheduleSection") loadSchedule();
+    if (sectionId === "registerSection") loadRegistrationPriority();
     const [title, subtitle] = SECTION_TITLES[sectionId];
     document.getElementById("topbarTitle").textContent = title;
     document.getElementById("topbarSubtitle").textContent = subtitle;
@@ -2359,9 +2519,30 @@
     credError.classList.toggle("hidden", !msg);
   }
 
+  // Job crawl đang chạy (để nút × hủy đúng job) và lỗi cuối cùng để hiện cho người dùng.
+  let activeJobId = null;
+  let lastCrawlError = "";
+
+  function cancelActiveCrawl() {
+    const id = activeJobId;
+    activeJobId = null;
+    if (!id) return;
+    // keepalive: vẫn gửi được kể cả khi người dùng đóng/tải lại trang ngay sau đó.
+    fetch(`/api/crawl_cancel/${id}`, { method: "POST", keepalive: true }).catch(() => {});
+  }
+
+  // Job lỗi/bị dừng: bỏ spinner, đổi màu, hiện lý do thay vì dòng "Đang mở/kết nối...".
+  function showCrawlFailure(fallback) {
+    crawlModalCard?.classList.add("crawl-failed");
+    if (crawlModalSubtitle) crawlModalSubtitle.textContent = lastCrawlError || fallback || "Crawl đã dừng.";
+    document.getElementById("btnCloseCrawlDone")?.classList.remove("hidden");
+  }
+
   // Bước 1: mở cửa sổ và hiện form nhập mã sinh viên + mật khẩu.
   function openCrawlModalAndStart() {
     closeMobileSidebar();
+    crawlModalCard?.classList.remove("crawl-failed");
+    lastCrawlError = "";
     document.getElementById("crawlModeChoice").classList.add("hidden");
     document.getElementById("crawlProgress").classList.add("hidden");
     document.getElementById("crawlLog").textContent = "";
@@ -2412,6 +2593,7 @@
   document.getElementById("btnCrawlHero")?.addEventListener("click", openCrawlModalAndStart);
   document.getElementById("crawlModalClose")?.addEventListener("click", () => {
     if (credPassword) credPassword.value = "";
+    cancelActiveCrawl(); // đóng popup = dừng job, không để crawl chạy ngầm
     crawlModal.classList.add("hidden");
     setRemoteBrowser("");
   });
@@ -2460,6 +2642,7 @@
 
   function appendLog(entry) {
     const logEl = document.getElementById("crawlLog");
+    if (entry.status === "error" && entry.message) lastCrawlError = entry.message;
     const prefix = { error: "[LỖI] ", ok: "[OK] ", running: "", info: "" }[entry.status] || "";
     logEl.textContent += prefix + (entry.message || "") + "\n";
     logEl.scrollTop = logEl.scrollHeight;
@@ -2470,9 +2653,12 @@
   }
 
   async function streamCrawlLogs(jobId) {
+    activeJobId = jobId;
     const res = await fetch(`/api/crawl_stream/${jobId}`);
     if (!res.ok || !res.body) {
+      activeJobId = null;
       appendLog({ status: "error", message: `Không mở được stream (status ${res.status}).` });
+      showCrawlFailure();
       return;
     }
 
@@ -2480,8 +2666,24 @@
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
     while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
+      let chunk_;
+      try {
+        chunk_ = await reader.read();
+      } catch (err) {
+        // Mất kết nối tới server giữa chừng: báo lỗi rõ ràng thay vì quay mãi.
+        activeJobId = null;
+        appendLog({ status: "error", message: "Mất kết nối tới server khi đang crawl." });
+        showCrawlFailure();
+        return;
+      }
+      const { value, done } = chunk_;
+      if (done) {
+        if (activeJobId === jobId) { // stream đóng mà chưa có sự kiện kết thúc
+          activeJobId = null;
+          showCrawlFailure("Kết nối bị ngắt trước khi crawl kết thúc.");
+        }
+        break;
+      }
       buffer += decoder.decode(value, { stream: true });
       let sepIndex;
       while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
@@ -2492,6 +2694,7 @@
         let entry;
         try { entry = JSON.parse(line.slice(5).trim()); } catch (_) { continue; }
         if (entry.event === "end") {
+          activeJobId = null;
           if (entry.status === "done") {
             // Crawl đã hoàn tất: nạp roadmap mới và chuyển thẳng vào dashboard.
             // Không bắt người dùng phải bấm nút Đóng thêm một lần nữa.
@@ -2512,8 +2715,8 @@
               document.getElementById("btnCloseCrawlDone").classList.remove("hidden");
             }
           } else {
-            // Nếu job lỗi thì giữ modal lại để người dùng đọc log.
-            document.getElementById("btnCloseCrawlDone").classList.remove("hidden");
+            // Nếu job lỗi thì giữ modal lại, dừng spinner và hiện lý do.
+            showCrawlFailure();
           }
           return;
         }
@@ -2530,6 +2733,7 @@
     initSimulator();
     initGraduation();
     initSchedule();
+    initRegistration();
   }
 
   init();
